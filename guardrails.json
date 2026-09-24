@@ -1,0 +1,38 @@
+{
+  "repo_root": "D:/Pets/varta.cmoka",
+  "allowlisted_commands": [
+    "python -m pytest tests/test_config.py",
+    "pytest -q tests/test_config.py",
+    "python -m pytest -q",
+    "python -m unittest discover -s tests -v",
+    "python -m compileall -q src tests",
+    "bash -n scripts/bootstrap-host.sh",
+    "DRY_RUN=1 bash scripts/bootstrap-host.sh",
+    "git status --short",
+    "git --no-pager diff -- .",
+    "git diff"
+  ],
+  "allowlisted_files": [
+    "README.md",
+    "AGENTS.md",
+    "src/**",
+    "tests/**",
+    "scripts/**",
+    ".github/**"
+  ],
+  "risk_levels": ["low", "medium", "high"],
+  "task_limits": {
+    "local_attempts": 3,
+    "paid_reviews": 2,
+    "changed_files": 5,
+    "command_timeout_seconds": 300
+  },
+  "secret_patterns": [
+    "(?i)(api[_-]?key|token|secret|password|passwd|private[_-]?key)[^\\n\\r]{0,30}[:=][ \\t]*[A-Za-z0-9_\\-./+=]{8,}",
+    "(?i)sk-[A-Za-z0-9]{16,}",
+    "(?i)(ghp|github_pat|gho|ghu|ghs|ghr)_[A-Za-z0-9_]{20,}",
+    "(?i)(AKIA|ASIA)[A-Z0-9]{12,}",
+    "(?i)-----BEGIN [A-Z ]*PRIVATE KEY-----",
+    "(?i)aws_access_key_id|aws_secret_access_key"
+  ]
+}

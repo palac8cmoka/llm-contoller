@@ -1,0 +1,29 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Runtime artifacts
+results/
+patches/
+
+# Local task experiments
+ollama-*
+*-metrics.json
+*-response.json
+*-request.json
+first-executor-*
+bridge-test-request.json
+executor-task-request.json
+executor-policy-task-request.json
+fix-task-request.json
+pr-regression-task-request.json
+profile-module-task-request.json
+controller-tests-task-request.json
+test-portability-task-request.json
+rerun-summary-counts-task.json
+
+# Local machine config
+.env
+
+# Incomplete local prototype
+controller_profile.py

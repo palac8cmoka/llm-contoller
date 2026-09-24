@@ -1,0 +1,25 @@
+{
+  "type": "implementation_task",
+  "task_id": "validate-xml-config",
+  "objective": "Validate required XML configuration fields.",
+  "allowed_files": [
+    "src/config.py",
+    "tests/test_config.py"
+  ],
+  "allowed_commands": [
+    "python -m pytest tests/test_config.py"
+  ],
+  "acceptance_criteria": [
+    "Missing required fields produce a clear error.",
+    "Existing valid configurations continue to work.",
+    "The targeted tests pass."
+  ],
+  "risk": "low",
+  "requires_human_approval": false,
+  "limits": {
+    "local_attempts": 1,
+    "paid_reviews": 1,
+    "changed_files": 1,
+    "command_timeout_seconds": 30
+  }
+}
