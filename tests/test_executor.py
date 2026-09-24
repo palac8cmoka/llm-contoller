@@ -184,6 +184,13 @@ class ExecutorTests(unittest.TestCase):
         self.assertLess(content.index("def added"), content.index("__main__"))
         self.assertEqual(content.count("__main__"), 1)
 
+    def test_append_allows_existing_secret_fixture(self):
+        original = "api_key=abcdefghijk\n"
+        code, content = self._run_main(
+            fenced("new\n"), task_overrides={"mode": "append"}, original=original
+        )
+        self.assertEqual(code, 0)
+        self.assertEqual(content, "api_key=abcdefghijk\nnew\n")
     def test_append_rejects_duplicate_main_guard(self):
         original = 'a = 1\n\n\nif __name__ == "__main__":\n    run()\n'
         code, content = self._run_main(
@@ -219,5 +226,57 @@ class ExecutorTests(unittest.TestCase):
         self.assertTrue(any("exceeds executor ceiling" in item for item in errors))
 
 
+class ControllerContractTests(unittest.TestCase):
+    def setUp(self):
+        self.config = {
+            "allowlisted_files": ["tests/**"],
+            "allowlisted_commands": ["python -m unittest discover -s tests -v"],
+            "risk_levels": ["low", "medium", "high"],
+            "task_limits": {
+                "local_attempts": 3, "paid_reviews": 2,
+                "changed_files": 5, "command_timeout_seconds": 300,
+            },
+        }
+
+    def _valid_task(self):
+        return {
+            "type": "implementation_task",
+            "task_id": "contract-test",
+            "objective": "Test contract.",
+            "allowed_files": ["tests/test_executor.py"],
+            "allowed_commands": ["python -m unittest discover -s tests -v"],
+            "acceptance_criteria": ["Tests pass."],
+            "risk": "low",
+            "requires_human_approval": False,
+            "limits": {
+                "local_attempts": 1, "paid_reviews": 1,
+                "changed_files": 1, "command_timeout_seconds": 30,
+            },
+        }
+
+    def test_optional_task_keys_are_not_unknown(self):
+        task = self._valid_task()
+        task.update({
+            "mode": "append",
+            "must_preserve": ["class ExecutorTests(unittest.TestCase):"],
+            "max_changed_lines": 70,
+            "max_deleted_lines": 0,
+            "environment": {"PYTHONPATH": "src"},
+        })
+        errors = executor.controller.validate_task_contract(
+            task, Path("D:/worktree"), self.config
+        )
+        self.assertFalse(any("Unknown task keys" in error for error in errors))
+
+    def test_unexpected_task_key_is_rejected(self):
+        task = self._valid_task()
+        task["unexpected"] = True
+        errors = executor.controller.validate_task_contract(
+            task, Path("D:/worktree"), self.config
+        )
+        self.assertTrue(any("Unknown task keys: unexpected" in error for error in errors))
+
+
 if __name__ == "__main__":
     unittest.main()
+
