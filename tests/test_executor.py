@@ -191,6 +191,15 @@ class ExecutorTests(unittest.TestCase):
         )
         self.assertEqual(code, 0)
         self.assertEqual(content, "api_key=abcdefghijk\nnew\n")
+    def test_append_strips_trailing_duplicate_main_guard(self):
+        original = 'a = 1\n\n\nif __name__ == "__main__":\n    unittest.main()\n'
+        response = fenced('def added():\n    return 2\n\nif __name__ == "__main__":\n    unittest.main()\n')
+        code, content = self._run_main(
+            response, task_overrides={"mode": "append"}, original=original
+        )
+        self.assertEqual(code, 0)
+        self.assertLess(content.index("def added"), content.index("__main__"))
+        self.assertEqual(content.count("__main__"), 1)
     def test_append_rejects_duplicate_main_guard(self):
         original = 'a = 1\n\n\nif __name__ == "__main__":\n    run()\n'
         code, content = self._run_main(
@@ -279,4 +288,3 @@ class ControllerContractTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

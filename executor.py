@@ -51,8 +51,20 @@ MARKDOWN_FENCE_PATTERN = re.compile(r"```[A-Za-z0-9_+-]*\n(.*?)```", re.S)
 MAIN_GUARD_PATTERN = re.compile(r"^if\s+__name__\s*==\s*[\"']__main__[\"']\s*:", re.M)
 
 
+def strip_duplicate_main_guard(block: str, original: str) -> str:
+    if not MAIN_GUARD_PATTERN.search(original):
+        return block
+    guard = MAIN_GUARD_PATTERN.search(block)
+    if not guard:
+        return block
+    tail = block[guard.start():].strip()
+    if tail in {"if __name__ == \"__main__\":\n    unittest.main()", "if __name__ == '__main__':\n    unittest.main()"}:
+        return block[:guard.start()].rstrip("\n")
+    return block
+
+
 def compose_append(original: str, block: str) -> str:
-    body = block.strip("\n")
+    body = strip_duplicate_main_guard(block, original).strip("\n")
     base = original if original.endswith("\n") else original + "\n"
     guard = MAIN_GUARD_PATTERN.search(base)
     if not guard:
@@ -415,9 +427,10 @@ def validate_body_response(
     if mode == "append":
         if not body.strip():
             return ["Appended block is empty."], None
-        if MAIN_GUARD_PATTERN.search(body) and MAIN_GUARD_PATTERN.search(original):
+        stripped_body = strip_duplicate_main_guard(body, original)
+        if MAIN_GUARD_PATTERN.search(stripped_body) and MAIN_GUARD_PATTERN.search(original):
             return ["Appended block repeats the module entry guard."], None
-        content = compose_append(original, body)
+        content = compose_append(original, stripped_body)
     else:
         content = body
     try:
@@ -592,4 +605,3 @@ def run_task_commands(
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
