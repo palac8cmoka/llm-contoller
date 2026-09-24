@@ -428,7 +428,8 @@ def validate_body_response(
         return ["Ollama response content contains NUL."], None
     if len(encoded) > MAX_BODY_BYTES:
         return ["Ollama response content exceeds size cap."], None
-    if controller.sanitize_text(content, patterns) != content:
+    scan_text = body if mode == "append" else content
+    if controller.sanitize_text(scan_text, patterns) != scan_text:
         return ["Secret-like content appears in proposed content."], None
     return [], content
 
@@ -591,3 +592,4 @@ def run_task_commands(
 
 if __name__ == "__main__":
     raise SystemExit(main())
+

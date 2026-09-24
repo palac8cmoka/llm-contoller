@@ -184,6 +184,13 @@ class ExecutorTests(unittest.TestCase):
         self.assertLess(content.index("def added"), content.index("__main__"))
         self.assertEqual(content.count("__main__"), 1)
 
+    def test_append_allows_existing_secret_fixture(self):
+        original = "api_key=abcdefghijk\n"
+        code, content = self._run_main(
+            fenced("new\n"), task_overrides={"mode": "append"}, original=original
+        )
+        self.assertEqual(code, 0)
+        self.assertEqual(content, "api_key=abcdefghijk\nnew\n")
     def test_append_rejects_duplicate_main_guard(self):
         original = 'a = 1\n\n\nif __name__ == "__main__":\n    run()\n'
         code, content = self._run_main(
@@ -221,3 +228,4 @@ class ExecutorTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
