@@ -286,5 +286,89 @@ class ControllerContractTests(unittest.TestCase):
         self.assertTrue(any("Unknown task keys: unexpected" in error for error in errors))
 
 
+class PolicyProfileTests(unittest.TestCase):
+    def _profile_file(self, data: dict) -> str:
+        handle = tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", delete=False)
+        with handle:
+            json.dump(data, handle)
+        self.addCleanup(lambda: Path(handle.name).unlink(missing_ok=True))
+        return handle.name
+
+    def _varta_profile(self) -> dict:
+        return {
+            "repo_root": "D:/Pets/varta.cmoka",
+            "allowlisted_files": ["README.md", "src/**", "tests/**", "scripts/**", ".github/**"],
+            "allowlisted_commands": [
+                "python -m unittest discover -s tests -v",
+                "python -m compileall -q src tests",
+                "bash -n scripts/bootstrap-host.sh",
+            ],
+            "risk_levels": ["low", "medium", "high"],
+            "task_limits": {
+                "local_attempts": 3,
+                "paid_reviews": 2,
+                "changed_files": 5,
+                "command_timeout_seconds": 300,
+            },
+        }
+
+    def test_legacy_guardrails_still_load(self):
+        path = self._profile_file(self._varta_profile())
+        config = executor.controller.load_config(path)
+        self.assertNotIn("profile", config)
+        self.assertIn("tests/**", config["allowlisted_files"])
+
+    def test_varta_profile_loads_by_active_profile(self):
+        path = self._profile_file({
+            "active_profile": "varta",
+            "profiles": {"varta": self._varta_profile()},
+        })
+        config = executor.controller.load_config(path)
+        self.assertEqual("varta", config["profile"])
+        self.assertIn("tests/**", config["allowlisted_files"])
+        self.assertIn(
+            "python -m unittest discover -s tests -v",
+            config["allowlisted_commands"],
+        )
+        self.assertEqual(300, config["task_limits"]["command_timeout_seconds"])
+
+    def test_explicit_profile_overrides_active_profile(self):
+        path = self._profile_file({
+            "active_profile": "other",
+            "profiles": {
+                "other": self._varta_profile(),
+                "varta": self._varta_profile() | {"allowlisted_files": ["tests/**"]},
+            },
+        })
+        config = executor.controller.load_config(path, "varta")
+        self.assertEqual(["tests/**"], config["allowlisted_files"])
+
+    def test_unknown_profile_fails_closed(self):
+        path = self._profile_file({
+            "active_profile": "varta",
+            "profiles": {"varta": self._varta_profile()},
+        })
+        with self.assertRaisesRegex(ValueError, "Unknown policy profile"):
+            executor.controller.load_config(path, "missing")
+
+    def test_profile_rejects_unknown_top_level_keys(self):
+        path = self._profile_file({
+            "active_profile": "varta",
+            "profiles": {"varta": self._varta_profile()},
+            "allowlisted_files": ["**"],
+        })
+        with self.assertRaisesRegex(ValueError, "Unknown top-level"):
+            executor.controller.load_config(path)
+
+    def test_profile_rejects_unknown_profile_keys(self):
+        profile = self._varta_profile() | {"extra": True}
+        path = self._profile_file({
+            "active_profile": "varta",
+            "profiles": {"varta": profile},
+        })
+        with self.assertRaisesRegex(ValueError, "Unknown config keys"):
+            executor.controller.load_config(path)
+
+
 if __name__ == "__main__":
     unittest.main()
