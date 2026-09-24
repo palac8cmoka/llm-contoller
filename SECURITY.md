@@ -1,21 +1,48 @@
 # Security Policy
 
-## Supported Versions
+## Supported versions
 
-Use this section to tell people about which versions of your project are
-currently being supported with security updates.
+This repository does not publish versioned releases yet. Security fixes target
+the default branch only.
 
-| Version | Supported          |
-| ------- | ------------------ |
-| 5.1.x   | :white_check_mark: |
-| 5.0.x   | :x:                |
-| 4.0.x   | :white_check_mark: |
-| < 4.0   | :x:                |
+| Version | Supported |
+| --- | --- |
+| `main` | Yes |
+| Tags or old commits | No |
 
-## Reporting a Vulnerability
+## Reporting a vulnerability
 
-Use this section to tell people how to report a vulnerability.
+Use GitHub private vulnerability reporting for this repository when available.
+If that is unavailable, open a GitHub issue with a minimal description and do
+not include exploit details, credentials, tokens, private logs, or customer
+data.
 
-Tell them where to go, how often they can expect to get an update on a
-reported vulnerability, what to expect if the vulnerability is accepted or
-declined, etc.
+For reports, include:
+
+- affected file or command;
+- impact and preconditions;
+- safe reproduction steps without secrets;
+- suggested fix, if known.
+
+Expect triage on a best-effort basis. Accepted fixes are handled as normal pull
+requests unless disclosure timing requires a private advisory.
+
+## Scope
+
+In scope:
+
+- controller validation bypasses;
+- unsafe file writes or command execution;
+- secret exposure in prompts, diffs, logs, or artifacts;
+- GitHub Actions or repository policy regressions.
+
+Out of scope:
+
+- denial-of-service against local development machines;
+- findings that require already having arbitrary local code execution;
+- placeholder sample values that are not real credentials.
+
+## Handling rules
+
+Do not commit real secrets, exploit payloads, private keys, or token material.
+Use minimal redacted examples. Keep reports focused on this repository.
