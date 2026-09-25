@@ -52,6 +52,20 @@ The bridge validates the request before sending it, requires JSON from Ollama,
 then validates the returned task before printing it. It never executes returned
 commands or edits repository files.
 
+## Policy profiles
+
+`guardrails.json` may define named policy profiles. The active profile is
+selected by `active_profile`, or explicitly with `--profile`. Profiles are
+standalone policy objects; unknown profile names and unknown profile keys fail
+closed.
+
+The included `varta` profile preserves the current Varta Cmoka file, command,
+risk, secret, and limit policy.
+
+```powershell
+python D:\Pets\llm-controller\controller.py validate-response --input D:\temp\llm-task.json --guardrails D:\Pets\llm-controller\guardrails.json --profile varta
+```
+
 ## Policy rules
 
 The controller fails closed on:

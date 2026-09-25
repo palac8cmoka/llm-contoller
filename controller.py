@@ -38,6 +38,15 @@ REQUIRED_LIMIT_FIELDS = {
     "changed_files",
     "command_timeout_seconds",
 }
+CONFIG_FIELDS = {
+    "repo_root",
+    "allowlisted_commands",
+    "allowlisted_files",
+    "secret_patterns",
+    "risk_levels",
+    "task_limits",
+}
+
 SECRET_PATTERNS = [
     r"(?i)(api[_-]?key|token|secret|password|passwd|private[_-]?key)[^\n\r]{0,30}[:=][ \t]*[A-Za-z0-9_\-./+=]{8,}",
     r"(?i)sk-[A-Za-z0-9]{16,}",
@@ -48,39 +57,63 @@ SECRET_PATTERNS = [
 ]
 
 
-def load_config(path: str | Path | None) -> dict[str, Any]:
-    cfg_path = Path(path) if path else Path(__file__).with_name("guardrails.json")
-    if not cfg_path.exists():
-        return {
-            "repo_root": str(Path("D:/Pets/varta.cmoka").resolve()),
-            "allowlisted_commands": [],
-            "allowlisted_files": [],
-            "secret_patterns": SECRET_PATTERNS,
-            "risk_levels": ["low", "medium", "high"],
-            "task_limits": {
-                "local_attempts": 3,
-                "paid_reviews": 2,
-                "changed_files": 5,
-                "command_timeout_seconds": 300,
-            },
-        }
-    with cfg_path.open("r", encoding="utf-8") as fh:
-        data = json.load(fh)
-    data.setdefault("repo_root", str(Path("D:/Pets/varta.cmoka").resolve()))
-    data.setdefault("allowlisted_commands", [])
-    data.setdefault("allowlisted_files", [])
-    data.setdefault("secret_patterns", SECRET_PATTERNS)
-    data.setdefault("risk_levels", ["low", "medium", "high"])
-    data.setdefault(
-        "task_limits",
-        {
+def default_config() -> dict[str, Any]:
+    return {
+        "repo_root": str(Path("D:/Pets/varta.cmoka").resolve()),
+        "allowlisted_commands": [],
+        "allowlisted_files": [],
+        "secret_patterns": SECRET_PATTERNS,
+        "risk_levels": ["low", "medium", "high"],
+        "task_limits": {
             "local_attempts": 3,
             "paid_reviews": 2,
             "changed_files": 5,
             "command_timeout_seconds": 300,
         },
-    )
-    return data
+    }
+
+
+def normalize_config(data: dict[str, Any]) -> dict[str, Any]:
+    unknown = sorted(set(data) - CONFIG_FIELDS)
+    if unknown:
+        raise ValueError(f"Unknown config keys: {', '.join(unknown)}")
+    config = default_config()
+    config.update(data)
+    config.setdefault("secret_patterns", SECRET_PATTERNS)
+    return config
+
+
+def select_profile(data: dict[str, Any], profile: str | None) -> dict[str, Any]:
+    profiles = data.get("profiles")
+    if profiles is None:
+        return normalize_config(data)
+    if not isinstance(profiles, dict):
+        raise ValueError("Field 'profiles' must be an object.")
+    selected = profile or data.get("active_profile")
+    if not isinstance(selected, str) or not selected:
+        raise ValueError("Profile name is required when profiles are configured.")
+    if selected not in profiles:
+        raise ValueError(f"Unknown policy profile: {selected}")
+    profile_data = profiles[selected]
+    if not isinstance(profile_data, dict):
+        raise ValueError(f"Policy profile '{selected}' must be an object.")
+    unknown_top = sorted(set(data) - {"active_profile", "profiles"})
+    if unknown_top:
+        raise ValueError(f"Unknown top-level profile config keys: {', '.join(unknown_top)}")
+    config = normalize_config(profile_data)
+    config["profile"] = selected
+    return config
+
+
+def load_config(path: str | Path | None, profile: str | None = None) -> dict[str, Any]:
+    cfg_path = Path(path) if path else Path(__file__).with_name("guardrails.json")
+    if not cfg_path.exists():
+        return default_config()
+    with cfg_path.open("r", encoding="utf-8") as fh:
+        data = json.load(fh)
+    if not isinstance(data, dict):
+        raise ValueError("Guardrails file must contain a JSON object.")
+    return select_profile(data, profile)
 
 
 def redact_secrets(value: Any, patterns: list[str] | None = None) -> Any:
@@ -328,6 +361,7 @@ def main() -> int:
     parser.add_argument("--input", help="Path to JSON input file or '-' for stdin.")
     parser.add_argument("--repo-root", default=str(Path("D:/Pets/varta.cmoka").resolve()), help="Repository root to enforce.")
     parser.add_argument("--guardrails", help="Path to JSON guardrails file.")
+    parser.add_argument("--profile", help="Named policy profile to load.")
     parser.add_argument("--text", help="Raw text to redact.")
     parser.add_argument("--model", default="qwen2.5-coder:7b", help="Ollama model name.")
     parser.add_argument("--fallback-model", help="Retry once with this stronger Ollama model after contract rejection.")
@@ -335,7 +369,11 @@ def main() -> int:
     parser.add_argument("--timeout", type=int, default=300, help="Ollama request timeout in seconds.")
     args = parser.parse_args()
 
-    config = load_config(args.guardrails)
+    try:
+        config = load_config(args.guardrails, args.profile)
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        print(f"CONFIG VALIDATION FAILED: {exc}", file=sys.stderr)
+        return 1
     repo_root = normalize_repo_root(args.repo_root or config.get("repo_root"))
 
     if args.command == "sample-task":
