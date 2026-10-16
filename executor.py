@@ -561,6 +561,7 @@ def main() -> int:
     parser.add_argument("--task", required=True, type=Path)
     parser.add_argument("--worktree", required=True, type=Path)
     parser.add_argument("--guardrails", type=Path)
+    parser.add_argument("--profile", help="Named policy profile.")
     parser.add_argument("--model", default="qwen2.5-coder:32b")
     parser.add_argument("--endpoint", default="http://127.0.0.1:11434")
     # Wait while model alive, no kill
@@ -584,7 +585,7 @@ def main() -> int:
         if not worktree.is_dir():
             raise ValueError("Worktree path must be a directory.")
         task = load_json(args.task)
-        config = controller.load_config(args.guardrails)
+        config = controller.load_config(args.guardrails, args.profile)
         errors = validate_executor_task(task, worktree, config)
         errors.extend(ensure_clean_worktree(worktree))
         if errors:

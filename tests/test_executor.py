@@ -1,4 +1,5 @@
 import contextlib
+import fnmatch
 import io
 import json
 import tempfile
@@ -514,6 +515,17 @@ class PolicyProfileTests(unittest.TestCase):
         config = executor.controller.load_config(path)
         self.assertNotIn("profile", config)
         self.assertIn("tests/**", config["allowlisted_files"])
+
+    def test_palac_profile_in_shipped_guardrails(self):
+        path = Path(executor.__file__).with_name("guardrails.json")
+        config = executor.controller.load_config(path, "palac")
+        self.assertEqual("D:/Pets/palac.cmoka", config["repo_root"])
+        self.assertIn("tools/sanitize-har.ps1", config["allowlisted_files"])
+        for command in config["allowlisted_commands"]:
+            self.assertEqual([], executor.validate_command(command))
+        protected = ["tools/git-hooks/pre-commit.ps1", ".agents/skills/x/SKILL.md", ".github/workflows/x.yml"]
+        for rel_path in protected:
+            self.assertFalse(any(fnmatch.fnmatch(rel_path, p) for p in config["allowlisted_files"]), rel_path)
 
     def test_varta_profile_loads_by_active_profile(self):
         path = self._profile_file({
