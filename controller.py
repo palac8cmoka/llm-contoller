@@ -264,15 +264,20 @@ def validate_task_contract(task: dict[str, Any], repo_root: Path, config: dict[s
             if resolved in target_paths:
                 errors.append(f"Context file must not be an allowed target: {rel_path}")
                 continue
+            remaining = 20 * 1024 - context_bytes
             try:
-                content = resolved.read_bytes()
+                if resolved.stat().st_size > remaining:
+                    errors.append("Context files exceed the 20 KB total size cap.")
+                    break
+                with resolved.open("rb") as source:
+                    content = source.read(remaining + 1)
             except OSError as exc:
                 errors.append(f"Context file could not be read: {rel_path}: {exc}")
                 continue
-            context_bytes += len(content)
-            if context_bytes > 20 * 1024:
+            if len(content) > remaining:
                 errors.append("Context files exceed the 20 KB total size cap.")
                 break
+            context_bytes += len(content)
             text = content.decode("utf-8", errors="replace")
             if sanitize_text(text, config.get("secret_patterns")) != text:
                 errors.append(f"Sensitive content detected in context file '{rel_path}'.")

@@ -432,10 +432,14 @@ def read_context_files(task: dict, worktree: Path, patterns: list[str]) -> dict[
             raise ValueError(f"Context file escapes worktree: {name}") from exc
         if resolved == target or not resolved.is_file():
             raise ValueError(f"Context file must be a separate regular file: {name}")
-        raw = resolved.read_bytes()
-        total += len(raw)
-        if total > MAX_CONTEXT_BYTES:
+        remaining = MAX_CONTEXT_BYTES - total
+        if resolved.stat().st_size > remaining:
             raise ValueError("Context files exceed the 20 KB total size cap.")
+        with resolved.open("rb") as source:
+            raw = source.read(remaining + 1)
+        if len(raw) > remaining:
+            raise ValueError("Context files exceed the 20 KB total size cap.")
+        total += len(raw)
         content = raw.decode("utf-8")
         if controller.sanitize_text(content, patterns) != content:
             raise ValueError(f"Sensitive content detected in context file '{name}'.")
@@ -573,6 +577,7 @@ def main() -> int:
         "attempts": [],
     }
     diff = ""
+    proposal_applied = False
     run_id = uuid.uuid4().hex
     try:
         worktree = args.worktree.resolve(strict=True)
@@ -654,6 +659,7 @@ def main() -> int:
                 try:
                     atomic_write(target, proposed)
                     wrote_proposal = True
+                    proposal_applied = True
                     errors, attempt_diff, changed = validate_diff(
                         worktree, [allowed_path], patterns
                     )
@@ -677,6 +683,7 @@ def main() -> int:
                 result["validation_errors"] = errors
                 if wrote_proposal:
                     atomic_write(target, original)
+                    proposal_applied = False
                     result["rolled_back"] = True
                 last_preview = f"Original content:\n{original}\n\nProposed content:\n{previous}"
                 diff = attempt_diff
@@ -698,6 +705,9 @@ def main() -> int:
         result["rolled_back"] = True
         return finish_result(run_id, result, last_preview + "\n\n" + diff, 1)
     except (OSError, ValueError, RuntimeError, json.JSONDecodeError) as exc:
+        if proposal_applied:
+            atomic_write(target, original)
+            proposal_applied = False
         result["validation_errors"] = [str(exc)]
         result["status"] = "revise" if result["attempts"] else "blocked"
         result["rolled_back"] = bool(result["attempts"])

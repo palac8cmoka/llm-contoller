@@ -161,6 +161,7 @@ class ExecutorTests(unittest.TestCase):
     def _run_main(
         self, response, task_overrides=None, original="old\n", command_code=0,
         command_stdout="", command_stderr="", return_details=False,
+        write_result_error=None,
     ):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -185,6 +186,15 @@ class ExecutorTests(unittest.TestCase):
                 for code in command_codes
             ]
             stdout = io.StringIO()
+            result_write_count = 0
+
+            def write_result(run_id, result, diff):
+                nonlocal result_write_count
+                result_write_count += 1
+                if write_result_error and result_write_count == 1:
+                    raise RuntimeError(write_result_error)
+                return root / f"{run_id}.json", root / f"{run_id}.patch"
+
             with mock.patch.object(
                         executor, "request_ollama",
                         side_effect=[(item, {}) for item in response_list]
@@ -194,11 +204,8 @@ class ExecutorTests(unittest.TestCase):
                         executor, "controlled_run", side_effect=command_runs,
                     ), \
                     mock.patch.object(
-                        executor, "write_result",
-                        side_effect=lambda run_id, result, diff: (
-                            root / f"{run_id}.json", root / f"{run_id}.patch"
-                        ),
-                    ) as write_result, \
+                        executor, "write_result", side_effect=write_result,
+                    ) as write_result_mock, \
                     mock.patch("sys.argv", [
                         "executor.py", "--task", str(task_path),
                         "--worktree", str(root),
@@ -208,7 +215,7 @@ class ExecutorTests(unittest.TestCase):
                 code = executor.main()
             details = {
                 "prompts": [call.args[0] for call in request.call_args_list],
-                "result": write_result.call_args.args[1],
+                "result": write_result_mock.call_args.args[1],
                 "summary": json.loads(stdout.getvalue()),
             }
             outcome = (code, target.read_text(encoding="utf-8"))
@@ -228,6 +235,16 @@ class ExecutorTests(unittest.TestCase):
         code, content = self._run_main(fenced("old\nnew\n"))
         self.assertEqual(code, 0)
         self.assertEqual(content, "old\nnew\n")
+
+    def test_finish_result_failure_rolls_back_accepted_proposal(self):
+        code, content, details = self._run_main(
+            fenced("old\nnew\n"), return_details=True,
+            write_result_error="result write failed",
+        )
+        self.assertNotEqual(code, 0)
+        self.assertEqual(content, "old\n")
+        self.assertTrue(details["result"]["rolled_back"])
+        self.assertEqual(details["result"]["status"], "revise")
 
     def test_destructive_replacement_rejected(self):
         code, content = self._run_main(fenced("new\n"))
@@ -385,6 +402,23 @@ class ContextFileValidationTests(unittest.TestCase):
     def test_context_rejects_size_over_20_kb(self):
         (self.root / "include" / "large.h").write_bytes(b"x" * (20 * 1024 + 1))
         self.assertTrue(any("20 KB total size cap" in e for e in self.errors_for(["include/large.h"])))
+
+    def test_context_contract_rejects_oversize_before_read(self):
+        large = self.root / "include" / "large.h"
+        large.write_bytes(b"x" * (20 * 1024 + 1))
+        with mock.patch.object(Path, "open", autospec=True) as open_file:
+            errors = self.errors_for(["include/large.h"])
+        self.assertTrue(any("20 KB total size cap" in error for error in errors))
+        open_file.assert_not_called()
+
+    def test_executor_context_rejects_oversize_before_read(self):
+        large = self.root / "include" / "large.h"
+        large.write_bytes(b"x" * (20 * 1024 + 1))
+        task = self.task | {"context_files": ["include/large.h"]}
+        with mock.patch.object(Path, "open", autospec=True) as open_file:
+            with self.assertRaisesRegex(ValueError, "20 KB total size cap"):
+                executor.read_context_files(task, self.root, [])
+        open_file.assert_not_called()
 
     def test_context_rejects_secret(self):
         (self.root / "include" / "version.h").write_text("api_key=abcdefghijk", encoding="utf-8")
