@@ -12,6 +12,7 @@ import subprocess
 import tempfile
 import urllib.error
 import urllib.request
+import uuid
 from pathlib import Path
 
 import controller
@@ -29,6 +30,8 @@ METADATA_FILES = {
     ".editorconfig", ".gitattributes", ".gitignore", ".gitmodules",
 }
 MAX_BODY_BYTES = 1024 * 1024
+MAX_CONTEXT_BYTES = 20 * 1024
+MAX_REPAIR_OUTPUT_CHARS = 4000
 # Strict default: additive edits only
 DEFAULT_MAX_DELETED_LINES = 0
 DEFAULT_MAX_CHANGED_LINES = 200
@@ -89,7 +92,12 @@ def extract_fenced_body(response: str) -> tuple[list[str], str | None]:
         body = body[2:]
     elif body.startswith("\n"):
         body = body[1:]
-    return [], body.replace("\r\n", "\n")
+    body = body.replace("\r\n", "\n")
+    stripped = body.strip()
+    lines = stripped.splitlines()
+    if len(lines) >= 2 and re.fullmatch(r"```[A-Za-z0-9_+-]*\s*", lines[0]) and lines[-1].strip() == "```":
+        body = "\n".join(lines[1:-1])
+    return [], body
 
 
 class ExecutorRejection(Exception):
@@ -333,8 +341,21 @@ def validate_preservation(task: dict, original: str, proposed: str) -> list[str]
     return errors
 
 
-def implementation_prompt(task: dict, path: str, original: str) -> str:
+def implementation_prompt(
+    task: dict, path: str, original: str,
+    context_files: dict[str, str] | None = None,
+) -> str:
     criteria = "\n".join(f"- {item}" for item in task["acceptance_criteria"])
+    context = ""
+    if context_files:
+        files = "\n\n".join(
+            f"--- {name} (read-only) ---\n{content}"
+            for name, content in context_files.items()
+        )
+        context = (
+            "\nRead-only context (do not output these files):\n"
+            f"{files}\n"
+        )
     if task.get("mode") == "append":
         return (
             "Write only new code to append to the end of one file.\n"
@@ -342,6 +363,7 @@ def implementation_prompt(task: dict, path: str, original: str) -> str:
             f"Objective: {task['objective']}\n"
             "Acceptance criteria:\n"
             f"{criteria}\n"
+            f"{context}"
             "End of the current file:\n"
             f"{tail_context(original)}\n"
             "Rules: output only the new lines. Do not repeat existing code. "
@@ -356,6 +378,7 @@ def implementation_prompt(task: dict, path: str, original: str) -> str:
         f"Objective: {task['objective']}\n"
         "Acceptance criteria:\n"
         f"{criteria}\n"
+        f"{context}"
         "Current file content:\n"
         f"{original}\n"
         "Rules: output the complete file, keep every existing line, "
@@ -364,6 +387,60 @@ def implementation_prompt(task: dict, path: str, original: str) -> str:
         "Answer in exactly this format, with nothing before or after:\n"
         f"{BEGIN_MARKER}\n<complete file content>\n{END_MARKER}"
     )
+
+
+def repair_prompt(original_prompt: str, previous: str, errors: list[str], commands: list[dict]) -> str:
+    command_output = []
+    for item in commands:
+        if item.get("exit_code") not in (0, None) or item.get("error"):
+            command_output.append(
+                f"Command: {item.get('command', '')}\n"
+                f"Exit code: {item.get('exit_code')}\n"
+                f"stdout (last 4000 chars):\n{item.get('stdout', '')[-MAX_REPAIR_OUTPUT_CHARS:]}\n"
+                f"stderr (last 4000 chars):\n{item.get('stderr', '')[-MAX_REPAIR_OUTPUT_CHARS:]}\n"
+                f"Error: {item.get('error', '')}"
+            )
+    details = "\n".join(f"- {error}" for error in errors) or "- Unknown validation failure."
+    if command_output:
+        details += "\n" + "\n".join(command_output)
+    return (
+        "Repair the previous proposal. Return a corrected complete file in "
+        "the exact same marker format requested originally.\n\n"
+        "Original task prompt:\n" + original_prompt + "\n\n"
+        "Previous proposed file:\n" + previous + "\n\n"
+        "Concrete failure to fix:\n" + details
+    )
+
+
+def read_context_files(task: dict, worktree: Path, patterns: list[str]) -> dict[str, str]:
+    files: dict[str, str] = {}
+    total = 0
+    target = (worktree / relative_path(task["allowed_files"][0])).resolve(strict=True)
+    root = worktree.resolve(strict=True)
+    for name in task.get("context_files", []):
+        rel = relative_path(name)
+        lexical = worktree / rel
+        current = worktree
+        for part in rel.parts:
+            current = current / part
+            if current.is_symlink():
+                raise ValueError(f"Context file must not contain a symlink: {name}")
+        resolved = lexical.resolve(strict=True)
+        try:
+            resolved.relative_to(root)
+        except ValueError as exc:
+            raise ValueError(f"Context file escapes worktree: {name}") from exc
+        if resolved == target or not resolved.is_file():
+            raise ValueError(f"Context file must be a separate regular file: {name}")
+        raw = resolved.read_bytes()
+        total += len(raw)
+        if total > MAX_CONTEXT_BYTES:
+            raise ValueError("Context files exceed the 20 KB total size cap.")
+        content = raw.decode("utf-8")
+        if controller.sanitize_text(content, patterns) != content:
+            raise ValueError(f"Sensitive content detected in context file '{name}'.")
+        files[name] = content
+    return files
 
 
 def request_ollama(
@@ -493,8 +570,10 @@ def main() -> int:
         "commands": [],
         "rolled_back": False,
         "ollama": {},
+        "attempts": [],
     }
     diff = ""
+    run_id = uuid.uuid4().hex
     try:
         worktree = args.worktree.resolve(strict=True)
         if not worktree.is_dir():
@@ -505,79 +584,134 @@ def main() -> int:
         errors.extend(ensure_clean_worktree(worktree))
         if errors:
             result["validation_errors"] = errors
-            write_result(str(task.get("task_id", "invalid-task")), result, "Validation failed.\n")
-            return 1
+            return finish_result(run_id, result, "Validation failed.\n", 1)
 
         allowed_path = task["allowed_files"][0]
-        lexical_target = worktree / relative_path(allowed_path)
-        target = lexical_target.resolve()
+        relative = relative_path(allowed_path)
+        lexical_target = worktree / relative
+        target = lexical_target.resolve(strict=True)
         try:
             target.relative_to(worktree.resolve())
         except ValueError as exc:
             raise ValueError("Allowed target path escapes worktree.") from exc
-        if any(
-            current.is_symlink()
-            for current in (
-                worktree.joinpath(*relative_path(allowed_path).parts[:index])
-                for index in range(1, len(relative_path(allowed_path).parts) + 1)
-            )
-        ):
-            raise ValueError("Allowed target path contains a symlink.")
+        current = worktree
+        for part in relative.parts:
+            current = current / part
+            if current.is_symlink():
+                raise ValueError("Allowed target path contains a symlink.")
         if not target.is_file():
             raise ValueError("Allowed target must be an existing regular non-symlink file.")
         original = target.read_text(encoding="utf-8")
         environment, _ = validate_environment(task, worktree)
-        response, metrics = request_ollama(
-            implementation_prompt(task, allowed_path, original),
-            args.model, args.endpoint, args.generation_timeout,
-        )
-        result["ollama"] = metrics
         patterns = config.get("secret_patterns", controller.SECRET_PATTERNS)
-        errors, proposed = validate_body_response(
-            response, allowed_path, patterns, worktree,
-            original, task.get("mode", "full_body"),
+        context_files = read_context_files(task, worktree, patterns)
+        initial_prompt = implementation_prompt(
+            task, allowed_path, original, context_files
         )
-        if errors:
-            result["status"] = "revise"
-            result["validation_errors"] = errors
-            write_result(task["task_id"], result, "Validation failed.\n" + response)
-            return 1
-        errors = validate_preservation(task, original, proposed)
-        preview = f"Original content:\n{original}\n\nProposed content:\n{proposed}"
-        if errors:
-            result["status"] = "revise"
-            result["validation_errors"] = errors
-            write_result(task["task_id"], result, preview)
-            return 1
-        write_result(task["task_id"], result, preview)
-        atomic_write(target, proposed)
-        try:
-            errors, diff, changed = validate_diff(worktree, [allowed_path], patterns)
-            result["changed_files"] = changed
+        prompt = initial_prompt
+        attempts = task["limits"]["local_attempts"]
+        last_preview = ""
+
+        for number in range(1, attempts + 1):
+            attempt = {
+                "attempt": number,
+                "ollama": {},
+                "validation_errors": [],
+                "commands": [],
+            }
+            previous = ""
+            try:
+                response, metrics = request_ollama(
+                    prompt, args.model, args.endpoint, args.generation_timeout,
+                )
+                attempt["ollama"] = metrics
+                result["ollama"] = metrics
+            except RuntimeError as exc:
+                response = ""
+                errors = [str(exc)]
+                attempt["validation_errors"] = errors
+                result["attempts"].append(attempt)
+                result["validation_errors"] = errors
+                if number < attempts:
+                    prompt = repair_prompt(initial_prompt, previous, errors, [])
+                    continue
+                break
+
+            errors, proposed = validate_body_response(
+                response, allowed_path, patterns, worktree,
+                original, task.get("mode", "full_body"),
+            )
+            if proposed is not None:
+                previous = proposed
+            else:
+                previous = response
+            if not errors:
+                errors = validate_preservation(task, original, proposed)
+
+            attempt_diff = ""
+            wrote_proposal = False
+            if not errors:
+                try:
+                    atomic_write(target, proposed)
+                    wrote_proposal = True
+                    errors, attempt_diff, changed = validate_diff(
+                        worktree, [allowed_path], patterns
+                    )
+                    attempt["changed_files"] = changed
+                    result["changed_files"] = changed
+                    if not errors:
+                        command_results = run_task_commands(
+                            task["allowed_commands"], worktree,
+                            task["limits"]["command_timeout_seconds"], environment,
+                        )
+                        attempt["commands"] = command_results
+                        result["commands"] = command_results
+                        if any(item.get("exit_code") != 0 for item in command_results):
+                            errors = ["Task commands did not pass."]
+                except (OSError, ValueError, RuntimeError) as exc:
+                    errors = [str(exc)]
+
+            result["attempts"].append(attempt)
             if errors:
-                raise ExecutorRejection(errors)
-            result["commands"] = run_task_commands(
-                task["allowed_commands"], worktree,
-                task["limits"]["command_timeout_seconds"], environment,
-            )
-            if any(item.get("exit_code") != 0 for item in result["commands"]):
-                raise ExecutorRejection(["Task commands did not pass."])
-        except (ExecutorRejection, OSError, ValueError, RuntimeError) as exc:
-            atomic_write(target, original)
-            result["status"] = "revise"
-            result["rolled_back"] = True
-            result["validation_errors"] = (
-                exc.errors if isinstance(exc, ExecutorRejection) else [str(exc)]
-            )
-            write_result(task["task_id"], result, preview + "\n\n" + diff)
-            return 1
-        result["status"] = "accepted"
-        write_result(task["task_id"], result, preview + "\n\n" + diff)
-        return 0
+                attempt["validation_errors"] = errors
+                result["validation_errors"] = errors
+                if wrote_proposal:
+                    atomic_write(target, original)
+                    result["rolled_back"] = True
+                last_preview = f"Original content:\n{original}\n\nProposed content:\n{previous}"
+                diff = attempt_diff
+                if number < attempts:
+                    prompt = repair_prompt(
+                        initial_prompt, previous, errors, attempt["commands"]
+                    )
+                    continue
+                break
+
+            result["status"] = "accepted"
+            result["validation_errors"] = []
+            result["rolled_back"] = False
+            last_preview = f"Original content:\n{original}\n\nProposed content:\n{proposed}"
+            diff = attempt_diff
+            return finish_result(run_id, result, last_preview + "\n\n" + diff, 0)
+
+        result["status"] = "revise"
+        result["rolled_back"] = True
+        return finish_result(run_id, result, last_preview + "\n\n" + diff, 1)
     except (OSError, ValueError, RuntimeError, json.JSONDecodeError) as exc:
         result["validation_errors"] = [str(exc)]
-        write_result("executor-error", result, diff)
-        return 1
+        result["status"] = "revise" if result["attempts"] else "blocked"
+        result["rolled_back"] = bool(result["attempts"])
+        return finish_result(run_id, result, diff, 1)
+
+
+def finish_result(run_id: str, result: dict, diff: str, exit_code: int) -> int:
+    result_path, _ = write_result(run_id, result, diff)
+    print(json.dumps({
+        "status": result["status"],
+        "result_path": str(result_path),
+        "attempts": len(result["attempts"]),
+    }))
+    return exit_code
 
 
 def run_task_commands(

@@ -1,3 +1,5 @@
+import contextlib
+import io
 import json
 import tempfile
 import unittest
@@ -42,6 +44,86 @@ class ExecutorTests(unittest.TestCase):
         errors = executor.validate_executor_task(invalid, self.worktree, self.config)
         self.assertTrue(any("Missing task keys: limits" in item for item in errors))
 
+    def test_context_prompt_includes_read_only_files(self):
+        prompt = executor.implementation_prompt(
+            self.task, "src/app.py", "old\n", {"src/version.h": "#define VERSION 1\n"}
+        )
+        self.assertIn("Read-only context (do not output these files)", prompt)
+        self.assertIn("src/version.h", prompt)
+        self.assertIn("#define VERSION 1", prompt)
+
+    def test_fence_inside_markers_is_stripped(self):
+        errors, body = executor.extract_fenced_body(
+            "<<<FILE>>>\n```c\nint main(void) {}\n```\n<<<END>>>"
+        )
+        self.assertEqual(errors, [])
+        self.assertEqual(body, "int main(void) {}")
+
+    def test_repair_loop_succeeds_and_feeds_command_error(self):
+        code, content, details = self._run_main(
+            [fenced("old\nnew\n"), fenced("old\nnew\n")],
+            task_overrides={"limits": self.task["limits"] | {"local_attempts": 2}},
+            command_code=[1, 0], command_stderr="compiler: expected ';'",
+            return_details=True,
+        )
+        self.assertEqual(code, 0)
+        self.assertEqual(content, "old\nnew\n")
+        self.assertEqual(details["summary"]["attempts"], 2)
+        self.assertIn("compiler: expected ';'", details["prompts"][1])
+        self.assertIn("Task commands did not pass.", details["prompts"][1])
+        self.assertEqual(details["result"]["status"], "accepted")
+        self.assertEqual(len(details["result"]["attempts"]), 2)
+
+    def test_retry_starts_from_original_after_rollback(self):
+        observed = []
+        def request(prompt, model, endpoint, timeout):
+            observed.append(target.read_text(encoding="utf-8"))
+            return fenced("old\nnew\n"), {}
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            target = root / "src" / "app.py"
+            target.parent.mkdir()
+            target.write_text("old\n", encoding="utf-8")
+            task_path = root / "task.json"
+            task = self.task | {"limits": self.task["limits"] | {"local_attempts": 2}}
+            task_path.write_text(json.dumps(task), encoding="utf-8")
+            config_path = root / "guardrails.json"
+            config_path.write_text(json.dumps(self.config), encoding="utf-8")
+            git_results = ["", "", "src/app.py\0", "diff\n", "", "", "src/app.py\0", "diff\n", ""]
+            commands = [
+                CompletedProcess([], 1, "", "failure"),
+                CompletedProcess([], 0, "", ""),
+            ]
+            with mock.patch.object(executor, "request_ollama", side_effect=request), \
+                    mock.patch.object(executor, "git_output", side_effect=git_results), \
+                    mock.patch.object(executor, "controlled_run", side_effect=commands), \
+                    mock.patch.object(executor, "write_result", return_value=(root / "r.json", root / "p.patch")), \
+                    mock.patch("sys.argv", ["executor.py", "--task", str(task_path), "--worktree", str(root), "--guardrails", str(config_path)]), \
+                    contextlib.redirect_stdout(io.StringIO()):
+                code = executor.main()
+            self.assertEqual(code, 0)
+            self.assertEqual(observed, ["old\n", "old\n"])
+
+    def test_repair_loop_stops_at_local_attempts(self):
+        code, content, details = self._run_main(
+            ["not a marker response", "still invalid"],
+            task_overrides={"limits": self.task["limits"] | {"local_attempts": 2}},
+            return_details=True,
+        )
+        self.assertNotEqual(code, 0)
+        self.assertEqual(content, "old\n")
+        self.assertEqual(len(details["prompts"]), 2)
+        self.assertEqual(details["summary"]["attempts"], 2)
+        self.assertEqual(details["result"]["status"], "revise")
+        self.assertTrue(details["result"]["rolled_back"])
+
+    def test_stdout_summary_points_to_unique_result_path(self):
+        code, _, details = self._run_main(fenced("old\nnew\n"), return_details=True)
+        self.assertEqual(code, 0)
+        self.assertTrue(details["summary"]["result_path"].endswith(".json"))
+        self.assertNotEqual(details["summary"]["result_path"], "results/main-test.json")
+        self.assertEqual(details["summary"]["status"], "accepted")
+
     @mock.patch("executor.git_output")
     def test_changed_file_scope_rejection(self, git_output):
         git_output.side_effect = [
@@ -76,7 +158,10 @@ class ExecutorTests(unittest.TestCase):
         errors = executor.validate_executor_task(invalid, self.worktree, self.config)
         self.assertIn("Task must allow exactly one file.", errors)
 
-    def _run_main(self, response, task_overrides=None, original="old\n", command_code=0):
+    def _run_main(
+        self, response, task_overrides=None, original="old\n", command_code=0,
+        command_stdout="", command_stderr="", return_details=False,
+    ):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             target = root / "src" / "app.py"
@@ -89,23 +174,45 @@ class ExecutorTests(unittest.TestCase):
             task_path.write_text(json.dumps(task), encoding="utf-8")
             config_path = root / "guardrails.json"
             config_path.write_text(json.dumps(self.config), encoding="utf-8")
-            git_results = ["", "", "src/app.py\0", "diff\n", ""]
+            response_list = response if isinstance(response, list) else [response]
+            git_results = [""] + [
+                value for _ in response_list
+                for value in ("", "src/app.py\0", "diff\n", "")
+            ]
+            command_codes = command_code if isinstance(command_code, list) else [command_code]
+            command_runs = [
+                CompletedProcess([], code, command_stdout, command_stderr)
+                for code in command_codes
+            ]
+            stdout = io.StringIO()
             with mock.patch.object(
-                        executor, "request_ollama", return_value=(response, {})
-                    ), \
+                        executor, "request_ollama",
+                        side_effect=[(item, {}) for item in response_list]
+                    ) as request, \
                     mock.patch.object(executor, "git_output", side_effect=git_results), \
                     mock.patch.object(
-                        executor, "controlled_run",
-                        return_value=CompletedProcess([], command_code, "", ""),
+                        executor, "controlled_run", side_effect=command_runs,
                     ), \
-                    mock.patch.object(executor, "write_result"), \
+                    mock.patch.object(
+                        executor, "write_result",
+                        side_effect=lambda run_id, result, diff: (
+                            root / f"{run_id}.json", root / f"{run_id}.patch"
+                        ),
+                    ) as write_result, \
                     mock.patch("sys.argv", [
                         "executor.py", "--task", str(task_path),
                         "--worktree", str(root),
                         "--guardrails", str(config_path),
-                    ]):
+                    ]), \
+                    contextlib.redirect_stdout(stdout):
                 code = executor.main()
-            return code, target.read_text(encoding="utf-8")
+            details = {
+                "prompts": [call.args[0] for call in request.call_args_list],
+                "result": write_result.call_args.args[1],
+                "summary": json.loads(stdout.getvalue()),
+            }
+            outcome = (code, target.read_text(encoding="utf-8"))
+            return (*outcome, details) if return_details else outcome
 
     def test_unfenced_response_rejected_and_does_not_mutate(self):
         code, content = self._run_main("here is the file: new\n")
@@ -233,6 +340,62 @@ class ExecutorTests(unittest.TestCase):
         invalid["max_deleted_lines"] = executor.CEILING_MAX_DELETED_LINES + 1
         errors = executor.validate_executor_task(invalid, self.worktree, self.config)
         self.assertTrue(any("exceeds executor ceiling" in item for item in errors))
+
+
+class ContextFileValidationTests(unittest.TestCase):
+    def setUp(self):
+        self.root = Path(tempfile.mkdtemp()).resolve()
+        self.addCleanup(lambda: __import__("shutil").rmtree(self.root, ignore_errors=True))
+        (self.root / "src").mkdir()
+        (self.root / "src" / "app.py").write_text("old\n", encoding="utf-8")
+        (self.root / "include").mkdir()
+        (self.root / "include" / "version.h").write_text("#define V 1\n", encoding="utf-8")
+        self.task = {
+            "type": "implementation_task", "task_id": "context-test",
+            "objective": "Test context files.", "allowed_files": ["src/app.py"],
+            "allowed_commands": ["python -m unittest discover -s tests -v"],
+            "acceptance_criteria": ["Tests pass."], "risk": "low",
+            "requires_human_approval": False,
+            "limits": {"local_attempts": 1, "paid_reviews": 1, "changed_files": 1, "command_timeout_seconds": 30},
+        }
+        self.config = {
+            "allowlisted_files": ["src/**"],
+            "allowlisted_commands": ["python -m unittest discover -s tests -v"],
+            "risk_levels": ["low", "medium", "high"],
+            "task_limits": {"local_attempts": 3, "paid_reviews": 2, "changed_files": 5, "command_timeout_seconds": 300},
+        }
+
+    def errors_for(self, paths):
+        task = self.task | {"context_files": paths}
+        return executor.validate_executor_task(task, self.root, self.config)
+
+    def test_context_list_is_bounded_and_string_only(self):
+        self.assertTrue(any("at most 5" in e for e in self.errors_for(["include/version.h"] * 6)))
+        self.assertTrue(any("non-empty string" in e for e in self.errors_for([4])))
+
+    def test_context_rejects_traversal(self):
+        self.assertTrue(any("relative and non-traversing" in e for e in self.errors_for(["../secret.txt"])))
+
+    def test_context_rejects_missing_file(self):
+        self.assertTrue(any("exist inside the worktree" in e for e in self.errors_for(["include/missing.h"])))
+
+    def test_context_rejects_target_file(self):
+        self.assertTrue(any("must not be an allowed target" in e for e in self.errors_for(["src/app.py"])))
+
+    def test_context_rejects_size_over_20_kb(self):
+        (self.root / "include" / "large.h").write_bytes(b"x" * (20 * 1024 + 1))
+        self.assertTrue(any("20 KB total size cap" in e for e in self.errors_for(["include/large.h"])))
+
+    def test_context_rejects_secret(self):
+        (self.root / "include" / "version.h").write_text("api_key=abcdefghijk", encoding="utf-8")
+        self.assertTrue(any("Sensitive content detected in context" in e for e in self.errors_for(["include/version.h"])))
+
+    def test_context_need_not_match_write_allowlist(self):
+        self.assertFalse(self.errors_for(["include/version.h"]))
+        task = self.task | {"context_files": ["include/version.h"]}
+        self.assertFalse(executor.controller.validate_task_contract(
+            task, self.root, self.config
+        ))
 
 
 class ControllerContractTests(unittest.TestCase):
