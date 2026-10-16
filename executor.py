@@ -561,7 +561,7 @@ def main() -> int:
     parser.add_argument("--task", required=True, type=Path)
     parser.add_argument("--worktree", required=True, type=Path)
     parser.add_argument("--guardrails", type=Path)
-    parser.add_argument("--model", default="qwen2.5-coder:7b")
+    parser.add_argument("--model", default="qwen2.5-coder:32b")
     parser.add_argument("--endpoint", default="http://127.0.0.1:11434")
     # Wait while model alive, no kill
     parser.add_argument("--generation-timeout", type=int, default=None)

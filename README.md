@@ -38,15 +38,13 @@ python D:\Pets\llm-controller\controller.py sanitize --text "API key=abc123" --g
 Ask Ollama for a task contract through the same validation gate:
 
 ```powershell
-python D:\Pets\llm-controller\controller.py ollama-task --input D:\Pets\llm-controller\request.json --repo-root D:\Pets\varta.cmoka --guardrails D:\Pets\llm-controller\guardrails.json --model qwen2.5-coder:7b
+python D:\Pets\llm-controller\controller.py ollama-task --input D:\Pets\llm-controller\request.json --repo-root D:\Pets\varta.cmoka --guardrails D:\Pets\llm-controller\guardrails.json --model qwen2.5-coder:32b
 ```
 
-Retry once with a stronger local model if the first response fails contract
-validation:
-
-```powershell
-python D:\Pets\llm-controller\controller.py ollama-task --input D:\Pets\llm-controller\request.json --repo-root D:\Pets\varta.cmoka --guardrails D:\Pets\llm-controller\guardrails.json --model qwen2.5-coder:7b --fallback-model qwen2.5-coder:14b
-```
+The default and only supported model is `qwen2.5-coder:32b`. On CPU, a
+contract takes minutes and one executor attempt about 20 minutes. Never set a
+deadline. Smaller models (7b, 14b) failed real tasks and are not used.
+`--fallback-model` still exists but is not part of the normal route.
 
 The bridge validates the request before sending it, requires JSON from Ollama,
 then validates the returned task before printing it. It never executes returned

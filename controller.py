@@ -424,7 +424,7 @@ def main() -> int:
     parser.add_argument("--guardrails", help="Path to JSON guardrails file.")
     parser.add_argument("--profile", help="Named policy profile to load.")
     parser.add_argument("--text", help="Raw text to redact.")
-    parser.add_argument("--model", default="qwen2.5-coder:7b", help="Ollama model name.")
+    parser.add_argument("--model", default="qwen2.5-coder:32b", help="Ollama model name.")
     parser.add_argument("--fallback-model", help="Retry once with this stronger Ollama model after contract rejection.")
     parser.add_argument("--endpoint", default="http://127.0.0.1:11434", help="Ollama base URL.")
     parser.add_argument("--timeout", type=int, default=300, help="Ollama request timeout in seconds.")
