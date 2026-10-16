@@ -38,15 +38,13 @@ python D:\Pets\llm-controller\controller.py sanitize --text "API key=abc123" --g
 Ask Ollama for a task contract through the same validation gate:
 
 ```powershell
-python D:\Pets\llm-controller\controller.py ollama-task --input D:\Pets\llm-controller\request.json --repo-root D:\Pets\varta.cmoka --guardrails D:\Pets\llm-controller\guardrails.json --model qwen2.5-coder:7b
+python D:\Pets\llm-controller\controller.py ollama-task --input D:\Pets\llm-controller\request.json --repo-root D:\Pets\varta.cmoka --guardrails D:\Pets\llm-controller\guardrails.json --model qwen2.5-coder:32b
 ```
 
-Retry once with a stronger local model if the first response fails contract
-validation:
-
-```powershell
-python D:\Pets\llm-controller\controller.py ollama-task --input D:\Pets\llm-controller\request.json --repo-root D:\Pets\varta.cmoka --guardrails D:\Pets\llm-controller\guardrails.json --model qwen2.5-coder:7b --fallback-model qwen2.5-coder:14b
-```
+The default and only supported model is `qwen2.5-coder:32b`. On CPU, a
+contract takes minutes and one executor attempt about 20 minutes. Never set a
+deadline. Smaller models (7b, 14b) failed real tasks and are not used.
+`--fallback-model` still exists but is not part of the normal route.
 
 The bridge validates the request before sending it, requires JSON from Ollama,
 then validates the returned task before printing it. It never executes returned
@@ -90,6 +88,7 @@ A paid-model reply must match this shape:
   "task_id": "validate-xml-config",
   "objective": "Validate required XML configuration fields.",
   "allowed_files": ["src/config.py", "tests/test_config.py"],
+  "context_files": ["src/version.h"],
   "allowed_commands": ["python -m pytest tests/test_config.py"],
   "acceptance_criteria": [
     "Missing required fields produce a clear error.",
@@ -132,6 +131,19 @@ counts are stored in the result JSON.
 Tasks may set `environment` with allowlisted keys only (currently
 `PYTHONPATH`). Values must be simple relative paths that resolve to existing
 directories inside the worktree, so tests can run without shell syntax.
+
+Optional `context_files` supplies up to five read-only repository files to the
+implementation prompt. Each must be an existing regular non-symlink file
+inside the worktree, must differ from the write target, and all context is
+capped at 20 KB and scanned for secrets. Context files need not match the
+write allowlist: they are read-only, while still subject to those path and
+content checks.
+
+The executor makes up to `limits.local_attempts` generations. It feeds
+validation, preservation, diff, or command failures (including bounded command
+output) back to the next generation and restores the original target between
+attempts. Every result JSON records each attempt; a one-line JSON summary on
+stdout identifies the unique result path and generation count.
 
 The model answers with one fenced body, either the `<<<FILE>>>`/`<<<END>>>`
 markers or a single markdown code block. Task `mode` selects `full_body`
