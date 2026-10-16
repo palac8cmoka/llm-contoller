@@ -42,6 +42,46 @@
         "(?i)-----BEGIN [A-Z ]*PRIVATE KEY-----",
         "(?i)aws_access_key_id|aws_secret_access_key"
       ]
+    },
+    "palac": {
+      "repo_root": "D:/Pets/palac.cmoka",
+      "allowlisted_commands": [
+        "pwsh -NoProfile -File tests/sanitize-har.test.ps1",
+        "pwsh -NoProfile -File tests/grab-hss-logs.test.ps1",
+        "pwsh -NoProfile -File tests/agent-review.test.ps1",
+        "pwsh -NoProfile -File tests/root-ssh-options.test.ps1",
+        "node tools/check-agent-skills.js",
+        "git status --short",
+        "git --no-pager diff -- .",
+        "git diff"
+      ],
+      "allowlisted_files": [
+        "tools/sanitize-har.ps1",
+        "tools/grab-hss-logs.ps1",
+        "tools/condense-hss-logs.ps1",
+        "tests/**",
+        "docs/**",
+        "OPERATIONS.md"
+      ],
+      "risk_levels": [
+        "low",
+        "medium",
+        "high"
+      ],
+      "task_limits": {
+        "local_attempts": 3,
+        "paid_reviews": 2,
+        "changed_files": 5,
+        "command_timeout_seconds": 300
+      },
+      "secret_patterns": [
+        "(?i)(api[_-]?key|token|secret|password|passwd|private[_-]?key)[^\\n\\r]{0,30}[:=][ \\t]*[A-Za-z0-9_\\-./+=]{8,}",
+        "(?i)sk-[A-Za-z0-9]{16,}",
+        "(?i)(ghp|github_pat|gho|ghu|ghs|ghr)_[A-Za-z0-9_]{20,}",
+        "(?i)(AKIA|ASIA)[A-Z0-9]{12,}",
+        "(?i)-----BEGIN [A-Z ]*PRIVATE KEY-----",
+        "(?i)aws_access_key_id|aws_secret_access_key"
+      ]
     }
   }
 }
