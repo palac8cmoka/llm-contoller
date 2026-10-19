@@ -30,6 +30,7 @@ OPTIONAL_TASK_FIELDS = {
     "max_deleted_lines",
     "environment",
     "mode",
+    "context_files",
 }
 
 REQUIRED_LIMIT_FIELDS = {
@@ -221,6 +222,66 @@ def validate_task_contract(task: dict[str, Any], repo_root: Path, config: dict[s
             if not any(fnmatch.fnmatch(rel_path, pattern) for pattern in file_allowlist):
                 errors.append(f"File not allowlisted: {rel_path}")
 
+    context_files = task.get("context_files", [])
+    if not isinstance(context_files, list):
+        errors.append("Field 'context_files' must be a list.")
+    elif len(context_files) > 5:
+        errors.append("Field 'context_files' must contain at most 5 paths.")
+    else:
+        context_bytes = 0
+        target_paths = set()
+        allowed_files = task.get("allowed_files", [])
+        for rel_path in allowed_files if isinstance(allowed_files, list) else []:
+            if isinstance(rel_path, str):
+                try:
+                    target_paths.add((repo_root / rel_path).resolve(strict=True))
+                except (OSError, RuntimeError):
+                    pass
+        for rel_path in context_files:
+            if not isinstance(rel_path, str) or not rel_path:
+                errors.append("Each context file must be a non-empty string.")
+                continue
+            path = Path(rel_path)
+            if path.is_absolute() or ".." in path.parts:
+                errors.append(f"Context file path must be relative and non-traversing: {rel_path}")
+                continue
+            try:
+                resolved = (repo_root / path).resolve(strict=True)
+                resolved.relative_to(repo_root.resolve())
+            except (OSError, RuntimeError, ValueError):
+                errors.append(f"Context file must exist inside the worktree: {rel_path}")
+                continue
+            current = repo_root
+            symlink = False
+            for part in path.parts:
+                current = current / part
+                if current.is_symlink():
+                    symlink = True
+                    break
+            if symlink or not resolved.is_file():
+                errors.append(f"Context file must be a regular non-symlink file: {rel_path}")
+                continue
+            if resolved in target_paths:
+                errors.append(f"Context file must not be an allowed target: {rel_path}")
+                continue
+            remaining = 20 * 1024 - context_bytes
+            try:
+                if resolved.stat().st_size > remaining:
+                    errors.append("Context files exceed the 20 KB total size cap.")
+                    break
+                with resolved.open("rb") as source:
+                    content = source.read(remaining + 1)
+            except OSError as exc:
+                errors.append(f"Context file could not be read: {rel_path}: {exc}")
+                continue
+            if len(content) > remaining:
+                errors.append("Context files exceed the 20 KB total size cap.")
+                break
+            context_bytes += len(content)
+            text = content.decode("utf-8", errors="replace")
+            if sanitize_text(text, config.get("secret_patterns")) != text:
+                errors.append(f"Sensitive content detected in context file '{rel_path}'.")
+
     if not isinstance(task.get("allowed_commands"), list):
         errors.append("Field 'allowed_commands' must be a list.")
     else:
@@ -363,7 +424,7 @@ def main() -> int:
     parser.add_argument("--guardrails", help="Path to JSON guardrails file.")
     parser.add_argument("--profile", help="Named policy profile to load.")
     parser.add_argument("--text", help="Raw text to redact.")
-    parser.add_argument("--model", default="qwen2.5-coder:7b", help="Ollama model name.")
+    parser.add_argument("--model", default="qwen2.5-coder:32b", help="Ollama model name.")
     parser.add_argument("--fallback-model", help="Retry once with this stronger Ollama model after contract rejection.")
     parser.add_argument("--endpoint", default="http://127.0.0.1:11434", help="Ollama base URL.")
     parser.add_argument("--timeout", type=int, default=300, help="Ollama request timeout in seconds.")
